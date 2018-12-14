@@ -22,21 +22,16 @@
 #
 # Copyright 2018 RackTop Systems.
 
+import cStringIO
 import datetime
 import os
 import subprocess
+import sys
 import unittest
 import json
+from threading import Timer
 
 os_guid = u"6b7e3683761ee397e78eb688222d8d5a"
-
-# def is_known_drive_vendor(mfg):
-#     m = {
-#         "hgst": 1,
-#         "hitachi": 1,
-#         "seagate": 1,
-#     }
-#     return mfg.lower() in m
 
 class BasicSystemSanity(unittest.TestCase):
     _hwinfo = []
@@ -58,6 +53,27 @@ class BasicSystemSanity(unittest.TestCase):
 
     def drive_type_sensible(self, t):
         return t.lower() in ("ssd", "hdd")
+    
+    def drive_is_mechanical(self, t):
+        return t.lower() == "hdd"
+
+    def drive_is_solid_state(self, t):
+        return t.lower() == "sdd"
+
+    def exec_with_timeout(self, cmd, timeout):
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE # Unused for now
+        )
+        timer = Timer(timeout, proc.kill)
+        try:
+            timer.start()
+            stdout, _ = proc.communicate()
+        finally:
+            if timer.isAlive():
+                timer.cancel()
+        return stdout
 
     @classmethod
     def hwinfo(cls):
@@ -66,10 +82,22 @@ class BasicSystemSanity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # We will refer to this information multiple times.
-        output = subprocess.check_output(
-            ["/usr/racktop/sbin/hwadm", "-j", "ls", "d"]
-        )
-        cls.hwinfo = json.loads(output)
+        try:
+            output = subprocess.check_output(
+                ["/usr/racktop/sbin/hwadm", "-j", "ls", "d"]
+            )
+        except subprocess.CalledProcessError as e:
+            if e.returncode == 1:
+                sys.stderr.write(
+                    "ERROR: hwd service is probably no running, " \
+                    "check with: 'svcs hwd'\n")
+                sys.stderr.flush()
+            else:
+                sys.stderr.write(
+                    "ERROR: something unexpected happened with hwd!\n")
+            sys.exit(1)
+        finally:
+            cls.hwinfo = json.loads(output)
 
     @classmethod
     def tearDownClass(cls):
@@ -87,12 +115,37 @@ class BasicSystemSanity(unittest.TestCase):
 
     def test_system_log_no_kernel_msgs(self):
         """ System log does not contain any kernel warnings or errors """
-        output = subprocess.check_output(
-            ["egrep", 'kern.warn|kern.err',"/var/adm/messages"])
-        self.assertEqual(output.rstrip('\n'), "",
+        output = self.exec_with_timeout(
+            ["egrep", 'kern.warn|kern.err',"/var/adm/messages"], 5)
+        lines_count = 0
+        handle = cStringIO.StringIO(output)
+        while True:
+            line = handle.readline()
+            if line == '':
+                break
+            if 'ddrx104' in line: # Hack, ddrdrive false positive
+                continue
+            else:
+                lines_count+=1
+        self.assertEqual(lines_count, 0,
             "Expected no output, instead log contains '%d' " \
-            "kernel warnings and/or errors" %
-            len(output.rstrip('\n').split('\n')))
+            "kernel warnings and/or errors" % lines_count)
+
+    def test_platform_info_expected(self):
+        """ Check that platform information is correctly set """
+        output = subprocess.check_output(["bsradm", "-j", "smb"])
+        j = json.loads(output)
+        self.assertEqual(j[u'Manufacturer'], "RackTop Systems",
+            "Expected value is 'RackTop Systems', actual is '%s'" \
+            % j[u'Manufacturer'])
+        self.assertEqual(j[u'Product'], "BrickStor",
+            "Expected value is 'BrickStor', actual is '%s'" % j[u'Product'])
+        self.assertTrue(j[u'IsValidHardware'], "Expected to report valid "\
+        "hardware")
+        self.assertTrue(j[u'Uuid'] != "",
+            "Expected system UUID to not be empty")
+        self.assertTrue(j[u'SystemSerial'] != "",
+            "Expected system serial number to not be empty")
 
     def test_smf_is_healthy(self):
         """ SMF should not report anything if all services are online """
@@ -105,35 +158,38 @@ class BasicSystemSanity(unittest.TestCase):
         output = subprocess.check_output(
             ["/usr/bin/svcs", "-H", "-o", "state", "hwd"])
         self.assertEqual(output.rstrip('\n'), "online",
-            "Expected 'online' got '%s'" % output.rstrip('\n'))
+            "Expected hwd to be 'online', got '%s'" % output.rstrip('\n'))
 
     def test_secured_is_online(self):
         """ secured service must always be online """
         output = subprocess.check_output(
             ["/usr/bin/svcs", "-H", "-o", "state", "secured"])
         self.assertEqual(output.rstrip('\n'), "online",
-            "Expected 'online' got '%s'" % output.rstrip('\n'))
+            "Expected secured to be 'online', " \
+            "got '%s'" % output.rstrip('\n'))
 
     def test_dataprotectiond_is_online(self):
         """ dataprotectiond service must always be online """
         output = subprocess.check_output(
             ["/usr/bin/svcs", "-H", "-o", "state", "dataprotectiond"])
         self.assertEqual(output.rstrip('\n'), "online",
-            "Expected 'online' got '%s'" % output.rstrip('\n'))
+            "Expected dataprotectiond to be 'online', " \
+            "got '%s'" % output.rstrip('\n'))
 
     def test_datareplicationd_is_disabled(self):
-        """ datareplicationd service must always be disabled """
+        """ datareplicationd service must always be online """
         output = subprocess.check_output(
             ["/usr/bin/svcs", "-H", "-o", "state", "datareplicationd"])
-        self.assertEqual(output.rstrip('\n'), "disabled",
-            "Expected 'disabled' got '%s'" % output.rstrip('\n'))
+        self.assertEqual(output.rstrip('\n'), "online",
+            "Expected datareplicationd to be 'online', " \
+            "got '%s'" % output.rstrip('\n'))
 
     def test_bsrapid_is_online(self):
         """ bsrapid service must always be online """
         output = subprocess.check_output(
             ["/usr/bin/svcs", "-H", "-o", "state", "bsrapid"])
         self.assertEqual(output.rstrip('\n'), "online",
-            "Expected 'online' got '%s'" % output.rstrip('\n'))
+            "Expected bsrapid to be 'online', got '%s'" % output.rstrip('\n'))
 
     def test_no_core_files_present(self):
         """ Check that there are no core files present """
@@ -143,13 +199,21 @@ class BasicSystemSanity(unittest.TestCase):
             % len(filenames))
 
     def test_license_installed_is_expected(self):
-        pass
+        """ Confirm host license is present """
+        output = subprocess.check_output(
+            ["/usr/racktop/sbin/myrackadm", "-j", "lic", "show"]
+        )
+        j = json.loads(output.rstrip('\n'))
+        self.assertNotEqual(j[u'Host'],
+            "0000-0000-0000-0000-00000-0000-00000-0000-00000")
 
     def test_domain_name_present(self):
+        """ Machine should have some value for domain name """
         output = subprocess.check_output(
-            ["/usr/racktop/sbin/bsradm", "dns", "domain", "get"]
+            ["/usr/racktop/sbin/bsradm", "-j", "dns", "domain", "get"]
         )
-        self.assertIsNot(output, "")
+        j = json.loads(output.rstrip('\n'))
+        self.assertTrue(j[u'result'] != "")
 
     def test_only_one_image_installed(self):
         """ Only a single OS image should be loaded """
@@ -161,6 +225,7 @@ class BasicSystemSanity(unittest.TestCase):
             "instead found '%d' images" % len(j))
 
     def test_os_version_expected(self):
+        """ Check that correct version of OS is loaded """
         output = subprocess.check_output(
             ["/usr/racktop/sbin/bsradm", "-j", "os"]
         )
@@ -177,7 +242,15 @@ class BasicSystemSanity(unittest.TestCase):
         % len(output.split('\n')[3:-1]))
 
     def test_no_fmdump_entries_expected(self):
-        pass
+        """ Fault management debug log should be empty """
+        output = self.exec_with_timeout(
+            ["/usr/sbin/fmdump", "-e", "-t30day"], 5)
+        # output = subprocess.check_output(
+            # ["/usr/sbin/fmdump", "-e", "-t30day"]
+        # )
+        self.assertEqual(len(output.split('\n')[1:]), 0,
+        "Expected to find no results, instead have '%d' errors" \
+        % len(output.split('\n')[1:]))
 
     def test_no_device_not_ready_errors_expected(self):
         """ Check that no drives report Device Not Ready """
@@ -251,8 +324,24 @@ class BasicSystemSanity(unittest.TestCase):
         self.assertEqual(errct, 0,
         "Expected to get 0 errors, instead have '%d' errors" % errct)
 
-    def test_no_scsi_vhci_errors_expected(self):
-        pass
+    def test_hwdadm_problem_counters_expected(self):
+        """ Check that trouble counters on drives are at zero """
+        counters = (
+            u"SoftErrors",
+            u"HardErrors",
+            u"TransportErrors",
+            u"MediaError",
+            u"DeviceNotReady",
+            u"NoDevice",
+            u"Recoverable",
+            u"IllegalRequest",
+            u"PredictiveFailureAnalysis"
+        )
+        for i in self.hwinfo:
+            for counter in counters:
+                self.assertEqual(i[u'OSInfo'][counter], 0,
+                "Expected to get 0 count, instead %s == '%d'" \
+                % (counter, i[u'OSInfo'][counter]))
 
     def test_hwadm_drive_attributes_expected(self):
         """ Check drive count and basic attributes are sensible """
@@ -296,7 +385,7 @@ class BasicSystemSanity(unittest.TestCase):
             bay_min_idx, bay_max_idx = 0, 83
             bay_idx = i[u'HWInfo'][u'Bay']
             temp_c = i[u'HWInfo'][u'CelsiusTemperature']
-            temp_max_c = i[u'HWInfo'][u'MaxFunctionalTemp']            
+            temp_max_c = i[u'HWInfo'][u'MaxFunctionalTemp']
             self.assertGreaterEqual(i[u'HWInfo'][u'Bay'], bay_min_idx,
                 "Bay number cannot be lower than '%d', " % bay_min_idx)
             self.assertLessEqual(i[u'HWInfo'][u'Bay'], bay_max_idx,
@@ -309,8 +398,23 @@ class BasicSystemSanity(unittest.TestCase):
             # Current temp cannot be greater than maximum operating temp
             self.assertLessEqual(temp_c, temp_max_c)
             self.assertTrue(self.drive_type_sensible(i[u'HWInfo'][u'Type']),
-                "Only SSDs and HDDs are allowed drive types")
-
+                "Only SSDs and HDDs are allowed drive types") 
+            # Drive power-on time must be non-negative, and not 0. 
+            self.assertGreater(i[u'HWInfo'][u'PowerOnDuration'], 0,
+                "Power-on duration must be a non-negative value > 0")
+            # Mechanical drives should report RPM value 7200
+            if self.drive_is_mechanical(i[u'HWInfo'][u'Type']):
+                self.assertEqual(i[u'HWInfo'][u'Rpm'], 7200,
+                "RPM value expected to be 7200, got '%d' instead" \
+                % i[u'HWInfo'][u'Rpm'])
+            elif self.drive_is_solid_state(i[u'HWInfo'][u'Type']):
+                self.assertEqual(i[u'HWInfo'][u'Rpm'], 0,
+                "RPM value expected to be 0 for SSDs, got '%d' instead" \
+                % i[u'HWInfo'][u'Rpm'])
+            # Drive capacity cannot be 0
+            self.assertGreater(i[u'OSInfo'][u'Capacity'], 100 << 30,
+                "Expected drive capacity to be greater than 100 gigabytes, " \
+                "got '%d' bytes instead" % i[u'OSInfo'][u'Capacity'])
 
 class CustomTextTestResult(unittest.TextTestResult):
     def addSuccess(self, test):
