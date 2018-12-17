@@ -245,10 +245,9 @@ class BasicSystemSanity(unittest.TestCase):
         """ Fault management debug log should be empty """
         output = self.exec_with_timeout(
             ["/usr/sbin/fmdump", "-e", "-t30day"], 5)
-        # output = subprocess.check_output(
-            # ["/usr/sbin/fmdump", "-e", "-t30day"]
-        # )
-        self.assertEqual(len(output.split('\n')[1:]), 0,
+
+        # We should have a total of 1 lines with header
+        self.assertEqual(len(output.rstrip('\n').split('\n')[1:]), 0,
         "Expected to find no results, instead have '%d' errors" \
         % len(output.split('\n')[1:]))
 
