@@ -34,7 +34,8 @@ from threading import Timer
 os_guid = u"6b7e3683761ee397e78eb688222d8d5a"
 
 class BasicSystemSanity(unittest.TestCase):
-    _hwinfo = []
+    _hwinfo     = []
+    _sedinfo    = []
     
     def known_drive_vendor(self, mfg):
         m = {
@@ -49,6 +50,14 @@ class BasicSystemSanity(unittest.TestCase):
         for entry in should_skip:
             if entry in make.lower():
                 return True
+        return False
+
+    def drive_is_from_bp(self, serial):
+        pools = self.sedinfo[u'Pools']
+        for pool in pools:
+            for this_serial in pool[u'DriveSerials']:
+                if serial == this_serial:
+                    return True
         return False
 
     def drive_type_sensible(self, t):
@@ -80,6 +89,10 @@ class BasicSystemSanity(unittest.TestCase):
         return cls._hwinfo
 
     @classmethod
+    def sedinfo(cls):
+        return cls._sedinfo
+
+    @classmethod
     def setUpClass(cls):
         # We will refer to this information multiple times.
         try:
@@ -98,6 +111,23 @@ class BasicSystemSanity(unittest.TestCase):
             sys.exit(1)
         finally:
             cls.hwinfo = json.loads(output)
+
+        try:
+            output = subprocess.check_output(
+                ["./secadm", "-j", "ls", "a"]
+            )
+        except subprocess.CalledProcessError as e:
+            if e.returncode == 1:
+                sys.stderr.write(
+                    "ERROR: secured service is probably no running, " \
+                    "check with: 'svcs secured'\n")
+                sys.stderr.flush()
+            else:
+                sys.stderr.write(
+                    "ERROR: something unexpected happened with secured!\n")
+            sys.exit(1)
+        finally:
+            cls.sedinfo = json.loads(output)
 
     @classmethod
     def tearDownClass(cls):
@@ -147,11 +177,40 @@ class BasicSystemSanity(unittest.TestCase):
         self.assertTrue(j[u'SystemSerial'] != "",
             "Expected system serial number to not be empty")
 
+    def test_profiles_expected(self):
+        """ Check that correct profiles are set on core OS filesystems """
+        output = subprocess.check_output(["/usr/sbin/zfs", "get", "-H", "-o", 
+            "value", "racktop:storage_profile", "bp/etc"])
+        self.assertEqual(output.rstrip('\n'), "sysconfig_filesystem",
+            "Expected to get 'sysconfig_filesystem', got '%s'" \
+            % output.rstrip('\n'))
+        output = subprocess.check_output(["/usr/sbin/zfs", "get", "-H", "-o", 
+            "value", "racktop:storage_profile", "bp/var"])
+        self.assertEqual(output.rstrip('\n'), "system",
+            "Expected to get 'system', got '%s'" \
+            % output.rstrip('\n'))
+
     def test_smf_is_healthy(self):
         """ SMF should not report anything if all services are online """
         output = subprocess.check_output(["/usr/bin/svcs", "-xv"])
         self.assertEqual(output, "",
             "Expected no output, instead one or more services is not healthy")
+
+    def test_bsrlicensed_is_online(self):
+        """ bsrlicensed service must always be online """
+        output = subprocess.check_output(
+            ["/usr/bin/svcs", "-H", "-o", "state", "bsrlicensed"])
+        self.assertEqual(output.rstrip('\n'), "online",
+            "Expected bsrlicensed to be 'online', " \
+            "got '%s'" % output.rstrip('\n'))
+
+    def test_bsrinit_is_online(self):
+        """ bsrinit service must always be online """
+        output = subprocess.check_output(
+            ["/usr/bin/svcs", "-H", "-o", "state", "bsrinit"])
+        self.assertEqual(output.rstrip('\n'), "online",
+            "Expected bsrinit to be 'online', " \
+            "got '%s'" % output.rstrip('\n'))
 
     def test_hwd_is_online(self):
         """ hwd service must always be online """
@@ -343,7 +402,7 @@ class BasicSystemSanity(unittest.TestCase):
                 % (counter, i[u'OSInfo'][counter]))
 
     def test_hwadm_drive_attributes_expected(self):
-        """ Check drive count and basic attributes are sensible """
+        """ Check drive count and basic attributes are acceptable """
         now = datetime.datetime.now()
         # Check that attributes of device make sense
         self.assertGreaterEqual(len(self.hwinfo), 12)
@@ -414,6 +473,28 @@ class BasicSystemSanity(unittest.TestCase):
             self.assertGreater(i[u'OSInfo'][u'Capacity'], 100 << 30,
                 "Expected drive capacity to be greater than 100 gigabytes, " \
                 "got '%d' bytes instead" % i[u'OSInfo'][u'Capacity'])
+
+    def test_secadm_sed_state_expected(self):
+        """ Check SED state of drives is acceptable """
+        for drive in self.sedinfo[u'Drives']:
+            self.assertTrue(drive[u'Serial'] != "",
+            "Expected Serial to not be an empty string, " \
+            "instead have empty string")
+            # Drives in bp pool will not be configured for SED, or compatible.
+            if self.drive_is_from_bp(drive[u'Serial']):
+                continue
+            self.assertTrue(drive[u'AutoUnlock'],
+            "Expected AutoUnlock to be set to True on %s" \
+            % drive[u'Serial'])
+            self.assertFalse(drive[u'Rekeying'],
+            "Expected Rekeying to be set to False")
+            self.assertEqual(drive[u'ReadyStatus'], "Ready",
+            "Expected ReadyStatus to be set to True")
+            self.assertEqual(drive[u'Status'], "NotEnrolled",
+            "Expected Status to be set to 'Not Enrolled'")
+            self.assertEqual(drive[u'Problems'], None,
+            "Expected Problems to be 'null'")
+        pass
 
 class CustomTextTestResult(unittest.TextTestResult):
     def addSuccess(self, test):
