@@ -26,6 +26,7 @@ import cStringIO
 import datetime
 import os
 import subprocess
+from subprocess import PIPE
 import sys
 import unittest
 import json
@@ -114,7 +115,7 @@ class BasicSystemSanity(unittest.TestCase):
 
         try:
             output = subprocess.check_output(
-                ["./secadm", "-j", "ls", "a"]
+                ["secadm", "-j", "ls", "a"]
             )
         except subprocess.CalledProcessError as e:
             if e.returncode == 1:
@@ -163,19 +164,43 @@ class BasicSystemSanity(unittest.TestCase):
 
     def test_platform_info_expected(self):
         """ Check that platform information is correctly set """
-        output = subprocess.check_output(["bsradm", "-j", "smb"])
+        output = subprocess.check_output(
+            ["/usr/racktop/sbin/bsradm", "-j", "smb"])
         j = json.loads(output)
         self.assertEqual(j[u'Manufacturer'], "RackTop Systems",
             "Expected value is 'RackTop Systems', actual is '%s'" \
             % j[u'Manufacturer'])
         self.assertEqual(j[u'Product'], "BrickStor",
             "Expected value is 'BrickStor', actual is '%s'" % j[u'Product'])
-        self.assertTrue(j[u'IsValidHardware'], "Expected to report valid "\
-        "hardware")
+        self.assertEqual(j[u'SystemFamily'], "BrickStor",
+            "Expected value is 'BrickStor', actual is '%s'" \
+            % j[u'SystemFamily'])
+        self.assertEqual(j[u'BaseboardPartNumber'], "S2600WTTR",
+            "Expected value is 'S2600WTTR', actual is '%s'" \
+            % j[u'BaseboardPartNumber'])
+        self.assertEqual(j[u'ChassisType'], "RackMountChassis",
+            "Expected value is 'RackMountChassis', actual is '%s'" \
+            % j[u'ChassisType'])
+        self.assertTrue(j[u'IsValidHardware'],
+            "Expected to report valid hardware")
+        self.assertFalse(j[u'BaseboardSerial'] == "None",
+            "Expected value for baseboard serial is not None")
+        self.assertTrue(len(j[u'BaseboardSerial']) == 12,
+            "Expected a 12 character long string for baseboard serial")
+        self.assertFalse(j[u'IsVm'], "Expected to report not a VM")
         self.assertTrue(j[u'Uuid'] != "",
             "Expected system UUID to not be empty")
         self.assertTrue(j[u'SystemSerial'] != "",
             "Expected system serial number to not be empty")
+
+    def test_bp_is_mirrored(self):
+        """ System pool 'bp' must be a 2-way mirror """
+        p = subprocess.Popen(
+            ['/usr/sbin/zpool', 'status', 'bp'], stdout=PIPE)
+        output = p.communicate()
+        self.assertEqual(
+            len([line for line in output[0].split('\n') 
+                if line.find('mirror') > 0]), 1, "Expected bp to be mirrored")
 
     def test_profiles_expected(self):
         """ Check that correct profiles are set on core OS filesystems """
@@ -257,7 +282,7 @@ class BasicSystemSanity(unittest.TestCase):
             "Expected to find no core files, instead found '%d' files" \
             % len(filenames))
 
-    def test_license_installed_is_expected(self):
+    def test_license_installed_expected(self):
         """ Confirm host license is present """
         output = subprocess.check_output(
             ["/usr/racktop/sbin/myrackadm", "-j", "lic", "show"]
@@ -405,7 +430,8 @@ class BasicSystemSanity(unittest.TestCase):
         """ Check drive count and basic attributes are acceptable """
         now = datetime.datetime.now()
         # Check that attributes of device make sense
-        self.assertGreaterEqual(len(self.hwinfo), 12)
+        self.assertGreaterEqual(len(self.hwinfo), 12,
+            "Expected a minimum of '12' drives, have '%d'" % len(self.hwinfo))
         for i in self.hwinfo:
             if self.skip_drive_ok(i[u'Make']):
                 continue # Skip devices that we don't expect to be used for pool
