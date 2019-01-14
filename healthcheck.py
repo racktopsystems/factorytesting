@@ -22,6 +22,7 @@
 #
 # Copyright 2018 RackTop Systems.
 
+import base64
 import cStringIO
 import datetime
 import os
@@ -34,10 +35,31 @@ from threading import Timer
 
 os_guid = u"6b7e3683761ee397e78eb688222d8d5a"
 
+ERR_NOT_POSSIBLE = "I am a virtual machine, this test is not possible!"
+
 class BasicSystemSanity(unittest.TestCase):
-    _hwinfo     = []
+    _hwinfo_drives     = []
+    _hwinfo_units = []
+    _hwinfo_all = []
     _sedinfo    = []
+    _smbiosinfo = []
+
+    _shelf_model_bay_count = {
+        u"H4060-J": 60,
+        u"GXY124S2V": 0,
+    }
+
+    @classmethod
+    def enclosure_bay_count_ok(cls, model, count):
+        if model not in cls._shelf_model_bay_count:
+            return False
+        if cls._shelf_model_bay_count[model] != count:
+            return False
+        return True
     
+    def iam_virtual(self):
+        return self.smbiosinfo[u'IsVm']
+
     def known_drive_vendor(self, mfg):
         m = {
             "hgst": 1,
@@ -86,19 +108,27 @@ class BasicSystemSanity(unittest.TestCase):
         return stdout
 
     @classmethod
-    def hwinfo(cls):
-        return cls._hwinfo
+    def hwinfo_drives(cls):
+        return cls._hwinfo_drives
+
+    @classmethod
+    def hwinfo_units(cls):
+        return cls._hwinfo_units
 
     @classmethod
     def sedinfo(cls):
         return cls._sedinfo
 
     @classmethod
+    def smbiosinfo(cls):
+        return cls._smbiosinfo
+
+    @classmethod
     def setUpClass(cls):
         # We will refer to this information multiple times.
         try:
             output = subprocess.check_output(
-                ["/usr/racktop/sbin/hwadm", "-j", "ls", "d"]
+                ["/usr/racktop/sbin/hwadm", "-j", "ls", "a"]
             )
         except subprocess.CalledProcessError as e:
             if e.returncode == 1:
@@ -111,11 +141,13 @@ class BasicSystemSanity(unittest.TestCase):
                     "ERROR: something unexpected happened with hwd!\n")
             sys.exit(1)
         finally:
-            cls.hwinfo = json.loads(output)
+            cls.hwinfo_drives = json.loads(output)[u'Drives']
+            cls.hwinfo_units = json.loads(output)[u'Units']
+
 
         try:
             output = subprocess.check_output(
-                ["secadm", "-j", "ls", "a"]
+                ["/usr/racktop/sbin/secadm", "-j", "ls", "a"]
             )
         except subprocess.CalledProcessError as e:
             if e.returncode == 1:
@@ -129,6 +161,12 @@ class BasicSystemSanity(unittest.TestCase):
             sys.exit(1)
         finally:
             cls.sedinfo = json.loads(output)
+        # This should only ever fail if the system is not registered, in which 
+        # case most of this is moot anyway.
+        output = subprocess.check_output(
+            ["/usr/racktop/sbin/bsradm", "-j", "smb"])
+        cls.smbiosinfo = json.loads(output)
+
 
     @classmethod
     def tearDownClass(cls):
@@ -162,11 +200,137 @@ class BasicSystemSanity(unittest.TestCase):
             "Expected no output, instead log contains '%d' " \
             "kernel warnings and/or errors" % lines_count)
 
+    def test_head_chassis_status_expected(self):
+        """ Check that controller chassis status is acceptable """
+        if self.iam_virtual():
+            self.skipTest(ERR_NOT_POSSIBLE)
+        d = {
+            'DiagButtonDisable': 'allowed',
+            'ChassisIntrusion': 'inactive',
+            'PowerButtonDisabled': 'false',
+            'ResetButtonDisabled': 'false',
+            'MainPowerFault': 'false',
+            'ResetButtonDisable': 'allowed',
+            'PowerControlFault': 'false',
+            'SleepButtonDisable': 'notallowed',
+            'PowerInterlock': 'inactive',
+            'DiagButtonDisabled': 'false',
+            'PowerOverload': 'false',
+            'Front-PanelLockout': 'inactive',
+            'PowerButtonDisable': 'allowed',
+            'SleepButtonDisabled': 'false',
+            'LastPowerEvent': '',
+            'Cooling/FanFault': 'false',
+            'SystemPower': 'on',
+            'DriveFault': 'false',
+            'PowerRestorePolicy': 'previous'
+        }
+        output = subprocess.check_output(
+            ["/usr/bin/ipmitool", "chassis", "status"]
+        )
+        split = lambda s: [tuple(w.replace(' ', '').split(':')) 
+            for w in s.rstrip('\n').split('\n')]
+        pairs = split(output.rstrip('\n'))
+        # Walk each value from the output of command and compare it to expected
+        # values saved in dict `d`, this may not be entirely correct.
+        for key, value in pairs:
+            if key in d:
+                self.assertEqual(value, d[key],
+                "Expected value is '%s', actual is '%s" % (d[key], value))
+
+    def test_hwadm_shelf_sensors_expected(self):
+        """ Check that all sensors in enclosure are in expected state """
+        if self.iam_virtual():
+            self.skipTest(ERR_NOT_POSSIBLE)
+
+        for unit in self.hwinfo_units:
+            for sensor in unit[u'Sensors']:
+                self.assertEqual(sensor[u'Status'], u'OK',
+                    "Expected value is 'OK', actual is %s" % sensor[u'Status'])
+
+    def test_hwdadm_head_unit_exists_expected(self):
+        """ Exactly one head unit must be present """
+        if self.iam_virtual():
+            self.skipTest(ERR_NOT_POSSIBLE)
+        head_count = 0
+        for unit in self.hwinfo_units:
+            if unit[u'IsHeadUnit']:
+                head_count +=1 
+
+        self.assertEqual(head_count, 1,
+        "Expected '1' head units, got '%d'" % head_count)
+
+    def test_enclusures_multipathed_expected(self):
+        """ Check that more than a single SAS path is connected """
+        if self.iam_virtual():
+            self.skipTest(ERR_NOT_POSSIBLE)
+        for unit in self.hwinfo_units:
+            if unit[u'IsHeadUnit']:
+                continue
+            self.assertTrue(len(unit[u'Paths']) > 1,
+            "Expected at least two paths connected to enclosure")
+
+    def test_hwadm_drive_bay_state_expected(self):
+        """ Check that all bays in enclosures are in expected state """
+        if self.iam_virtual():
+            self.skipTest(ERR_NOT_POSSIBLE)
+        # print self.hwinfo_units
+        # If this is a head, instead of a list, u'DriveBays' object is 
+        # actually null, which does not play nice when you do len(None).
+        # To avoid this, we instead create a local length function, just for
+        # this method, which returns 0 in the None case, and len(d) otherwise
+        # for the u'DriveBays' dict.
+        llen = lambda d: 0 if d is None else len(d)
+        for unit in self.hwinfo_units:
+            self.assertTrue(
+                self.enclosure_bay_count_ok(
+                    unit[u'PartNumber'], llen(unit[u'DriveBays'])),
+                    "Got unexpected bay count for enclosure %s" % \
+                    unit[u'PartNumber'])
+            if unit[u'DriveBays'] != None:
+                for idx, bay in enumerate(unit[u'DriveBays']):
+                    self.assertEqual(bay[u'Status'], u'OK',
+                    "Expected value is 'OK', actual is '%s'" % bay[u'Status']
+                    )
+                    self.assertIsNone(bay[u'Problems'],
+                    "Expected value is 'None', actual is '%s'" % bay[u'Problems'])
+                    self.assertFalse(bay[u'FaultLedOn'],
+                    "Expected Fault Light to be off")
+                    self.assertFalse(bay[u'IdentifyLedOn'],
+                    "Expected Identify Light to be off")
+                    self.assertEqual(idx, bay[u'BayNumber'],
+                    "Expected value is '%d', actual is '%d'" % \
+                    (idx, bay[u'BayNumber']))
+
+    def test_bmc_has_root_acct_expected(self):
+        """ Check that BMC has root account created """
+        if self.iam_virtual():
+            self.skipTest(ERR_NOT_POSSIBLE)
+        output = subprocess.check_output(
+            ["/usr/bin/ipmitool", "user", "test", "2", "16",
+                base64.b64decode(b'cmFja3RvcA==')]
+        )
+        self.assertEqual(output.rstrip('\n'), "Success",
+        "Expected value is 'Success', actual is '%s'" % output)
+
+    def test_head_hw_state_expected(self):
+        """ Check that sensor readings in controller are acceptable """
+        if self.iam_virtual():
+            self.skipTest(ERR_NOT_POSSIBLE)
+        output = subprocess.check_output(
+            ["/usr/bin/ipmitool", "sdr", "jlist"]
+        )
+        j = json.loads(output)
+        for item in j[u'IPMISDRDUMP']:
+            if u'Health' in item.keys():
+                # Some sensors will report `ns => not specified`, which we
+                # cannot really do much about, but assume that they are OK.
+                self.assertIn(item[u'Health'], [u'ok', u'ns'],
+                "Expected value is 'ok', actual is '%s'" % item[u'Health'])
+
     def test_platform_info_expected(self):
         """ Check that platform information is correctly set """
-        output = subprocess.check_output(
-            ["/usr/racktop/sbin/bsradm", "-j", "smb"])
-        j = json.loads(output)
+        j = self.smbiosinfo
         self.assertEqual(j[u'Manufacturer'], "RackTop Systems",
             "Expected value is 'RackTop Systems', actual is '%s'" \
             % j[u'Manufacturer'])
@@ -420,7 +584,7 @@ class BasicSystemSanity(unittest.TestCase):
             u"IllegalRequest",
             u"PredictiveFailureAnalysis"
         )
-        for i in self.hwinfo:
+        for i in self.hwinfo_drives:
             for counter in counters:
                 self.assertEqual(i[u'OSInfo'][counter], 0,
                 "Expected to get 0 count, instead %s == '%d'" \
@@ -430,9 +594,9 @@ class BasicSystemSanity(unittest.TestCase):
         """ Check drive count and basic attributes are acceptable """
         now = datetime.datetime.now()
         # Check that attributes of device make sense
-        self.assertGreaterEqual(len(self.hwinfo), 12,
-            "Expected a minimum of '12' drives, have '%d'" % len(self.hwinfo))
-        for i in self.hwinfo:
+        self.assertGreaterEqual(len(self.hwinfo_drives), 12,
+            "Expected a minimum of '12' drives, have '%d'" % len(self.hwinfo_drives))
+        for i in self.hwinfo_drives:
             if self.skip_drive_ok(i[u'Make']):
                 continue # Skip devices that we don't expect to be used for pool
             self.assertTrue(self.known_drive_vendor(i[u'Make']),
