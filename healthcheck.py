@@ -33,7 +33,7 @@ import unittest
 import json
 from threading import Timer
 
-os_guid = u"6b7e3683761ee397e78eb688222d8d5a"
+os_guid = u"dba9947551e0e39790c68660ed248775"
 
 ERR_NOT_POSSIBLE = "I am a virtual machine, this test is not possible!"
 
@@ -45,8 +45,9 @@ class BasicSystemSanity(unittest.TestCase):
     _smbiosinfo = []
 
     _shelf_model_bay_count = {
-        u"H4060-J": 60,
-        u"GXY124S2V": 0,
+        u'H4060-J': 60,
+        u'GXY124S2V': 0,
+        u'GXY108S2V': 0,
     }
 
     @classmethod
@@ -245,8 +246,11 @@ class BasicSystemSanity(unittest.TestCase):
 
         for unit in self.hwinfo_units:
             for sensor in unit[u'Sensors']:
-                self.assertEqual(sensor[u'Status'], u'OK',
-                    "Expected value is 'OK', actual is %s" % sensor[u'Status'])
+                self.assertIn(sensor[u'Status'], [u'OK', u'NotInstalled'],
+                    "Expected value is 'OK' or 'NotInserted', actual value " \
+                    "of '%s' sensor is '%s'" % (
+                        sensor[u'Name'], sensor[u'Status'])
+                )
 
     def test_hwdadm_head_unit_exists_expected(self):
         """ Exactly one head unit must be present """
@@ -289,8 +293,9 @@ class BasicSystemSanity(unittest.TestCase):
                     unit[u'PartNumber'])
             if unit[u'DriveBays'] != None:
                 for idx, bay in enumerate(unit[u'DriveBays']):
-                    self.assertEqual(bay[u'Status'], u'OK',
-                    "Expected value is 'OK', actual is '%s'" % bay[u'Status']
+                    self.assertIn(bay[u'Status'], [u'OK', u'NotInstalled'],
+                    "Expected value is 'OK' or 'NotInserted', actual value " \
+                    "of bay '%d' is '%s'" % (idx, bay[u'Status'])
                     )
                     self.assertIsNone(bay[u'Problems'],
                     "Expected value is 'None', actual is '%s'" % bay[u'Problems'])
@@ -301,6 +306,21 @@ class BasicSystemSanity(unittest.TestCase):
                     self.assertEqual(idx, bay[u'BayNumber'],
                     "Expected value is '%d', actual is '%d'" % \
                     (idx, bay[u'BayNumber']))
+
+    def test_controller_psu_state_expected(self):
+        """ Check that power supply state is acceptable """
+        if self.iam_virtual():
+            self.skipTest(ERR_NOT_POSSIBLE)
+
+        psu_count = 0
+        for sensor in self.hwinfo_units[0][u'Sensors']:
+            if sensor[u'Name'] == u'PS1' or sensor[u'Name'] == u'PS2':
+                psu_count += 1
+                self.assertEqual(sensor[u'Type'], "Power", "Expected value is 'Power', actual is '%s'" % sensor[u'Type'])
+
+        self.assertEqual(psu_count, 2,
+            "Expected to observe '2' power supplies, instead have '%d'" % \
+            psu_count)
 
     def test_bmc_has_root_acct_expected(self):
         """ Check that BMC has root account created """
@@ -673,6 +693,19 @@ class BasicSystemSanity(unittest.TestCase):
             # Drives in bp pool will not be configured for SED, or compatible.
             if self.drive_is_from_bp(drive[u'Serial']):
                 continue
+            # Several things need to be checked if drive is not supported.
+            # If not support it should not be possible to rekey, lock, etc.
+            if drive[u'Status'] == u'NotSupported':
+                for a, b in [
+                    (u'Rekeying', "Expected Rekeying to be set to False"),
+                    (u'AutoUnlock', "Expected AutoUnlock to be set to False"),
+                    (u'Refreshing', "Expected Refreshing to be set to False"),
+                    (u'LastActionPending',
+                        "Expected LastActionPending to be set to False"),
+                ]:
+                    self.assertFalse(drive[a], b)
+                continue
+
             self.assertTrue(drive[u'AutoUnlock'],
             "Expected AutoUnlock to be set to True on %s" \
             % drive[u'Serial'])
