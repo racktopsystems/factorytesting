@@ -46,6 +46,8 @@ class BasicSystemSanity(unittest.TestCase):
 
     _shelf_model_bay_count = {
         u'H4060-J': 60,
+        u'SP-3424-E12EBD': 24,
+        u'SBX24LC-ECEBD': 24,
         u'GXY124S2V': 0,
         u'GXY108S2V': 0,
     }
@@ -706,8 +708,8 @@ class BasicSystemSanity(unittest.TestCase):
                     self.assertFalse(drive[a], b)
                 continue
 
-            self.assertTrue(drive[u'AutoUnlock'],
-            "Expected AutoUnlock to be set to True on %s" \
+            self.assertFalse(drive[u'AutoUnlock'],
+            "Expected AutoUnlock to be set to False on %s" \
             % drive[u'Serial'])
             self.assertFalse(drive[u'Rekeying'],
             "Expected Rekeying to be set to False")
